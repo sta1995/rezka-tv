@@ -1,6 +1,8 @@
 (function () {
     'use strict';
 
+    // HDRezka Extension 0.3.1 - standalone account authentication
+
     if (window.__hdrezka_extension_loaded) return;
     window.__hdrezka_extension_loaded = true;
 
@@ -42,7 +44,8 @@
         var proxy1 = (new Date().getHours() % 2) ? 'https://cors.nb557.workers.dev/' : 'https://cors.fx666.workers.dev/';
         var useRezkaProxy = L.Storage.field('hdrezka_auth_use_proxy') === true;
         if (name === 'cookie') return (customUrl || proxy1);
-        if (useRezkaProxy) return (customUrl || proxy1);
+        if (custom && customUrl) return customUrl.replace(/\/+$/, '') + '/';
+        if (useRezkaProxy) return proxy1;
         return '';
     }
 
@@ -250,14 +253,18 @@
                 if (!authRequired(html)) return done();
                 doLogin();
             }, function () {
-                // Сетевая ошибка проверки сессии не должна блокировать обычный анонимный доступ.
-                if (stored) done(); else doLogin();
+                if (login && password) doLogin();
+                else {
+                    L.Storage.set('hdrezka_auth_status', 'false');
+                    notify('Не удалось проверить сессию HDRezka. Проверь зеркало и подключение.');
+                }
             });
         }
 
         function doLogin() {
             if (!login || !password) {
-                notify('Для авторизации HDRezka заполни логин и пароль в настройках оригинального Online_Mod.');
+                L.Storage.set('hdrezka_auth_status', 'false');
+                notify('Укажи логин и пароль в разделе Настройки → HDRezka, затем нажми «Войти / проверить авторизацию».');
                 return;
             }
             var postdata = 'login_name=' + encodeURIComponent(login) +
@@ -724,45 +731,89 @@
         });
     }
 
+    var AUTH_SETTINGS_REGISTERED = false;
+
     function registerAuthSettings() {
-        if (!L.SettingsApi || L.SettingsApi.getComponent('hdrezka_auth')) return;
-        L.SettingsApi.addComponent({
-            component: 'hdrezka_auth',
-            name: 'HDRezka',
-            icon: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M4 4h16v3H4zm0 6h16v3H4zm0 6h10v3H4z"/></svg>'
-        });
-        function add(name, type, label, extra, change) {
-            L.SettingsApi.addParam({
+        if (!L || !L.SettingsApi) return false;
+        if (AUTH_SETTINGS_REGISTERED) return true;
+
+        var api = L.SettingsApi;
+        if (!api.getComponent('hdrezka_auth')) {
+            api.addComponent({
                 component: 'hdrezka_auth',
-                param: Object.assign({name: name, type: type}, extra || {}),
-                field: {name: label},
-                onChange: change
+                name: 'HDRezka',
+                icon: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M4 4h16v3H4zm0 6h16v3H4zm0 6h10v3H4z"/></svg>'
             });
         }
-        add('hdrezka_auth_mirror', 'input', 'Адрес HDRezka', {placeholder: 'https://rezka.ag', default: 'https://rezka.ag'}, function () { HOST = ''; });
-        add('hdrezka_auth_login', 'input', 'Логин HDRezka', {placeholder: 'Логин', default: ''});
-        add('hdrezka_auth_password', 'input', 'Пароль HDRezka', {placeholder: 'Пароль', default: ''});
-        add('hdrezka_auth_use_proxy', 'trigger', 'Использовать прокси', {default: false});
-        add('hdrezka_auth_custom_proxy', 'trigger', 'Свой прокси', {default: false});
-        add('hdrezka_auth_proxy_url', 'input', 'Адрес прокси', {placeholder: 'https://proxy.example/', default: ''});
+
+        var existing = api.getParam('hdrezka_auth') || [];
+        var names = {};
+        existing.forEach(function (item) {
+            if (item && item.param && item.param.name) names[item.param.name] = true;
+        });
+
+        function add(name, type, label, extra, change, description) {
+            if (names[name]) return;
+            var param = Object.assign({name: name, type: type}, extra || {});
+            api.addParam({
+                component: 'hdrezka_auth',
+                param: param,
+                field: {name: label, description: description || ''},
+                onChange: change
+            });
+            names[name] = true;
+        }
+
+        add('hdrezka_auth_account_title', 'title', 'Учётная запись HDRezka');
+        add('hdrezka_auth_mirror', 'input', 'Адрес зеркала', {placeholder: 'https://rezka.ag', default: 'https://rezka.ag'}, function () {
+            HOST = '';
+            L.Storage.set('hdrezka_auth_cookie', '');
+            L.Storage.set('hdrezka_auth_status', 'false');
+        }, 'Укажи полный адрес сайта, например https://rezka.ag');
+        add('hdrezka_auth_login', 'input', 'Логин или e-mail', {placeholder: 'Логин HDRezka', default: ''});
+        add('hdrezka_auth_password', 'input', 'Пароль', {placeholder: 'Пароль HDRezka', default: ''});
         add('hdrezka_auth_login_action', 'button', 'Войти / проверить авторизацию', {}, function () {
-            L.Noty.show('Проверяю авторизацию HDRezka…');
+            var login = String(storage('hdrezka_auth_login', '') || '').trim();
+            var password = String(storage('hdrezka_auth_password', '') || '');
+            if (!login || !password) {
+                notify('Сначала заполни логин и пароль HDRezka.');
+                return;
+            }
+            notify('Выполняю вход в HDRezka…');
             ensureAuthorization(function () {
                 L.Storage.set('hdrezka_auth_status', 'true');
-                L.Noty.show('Авторизация HDRezka подтверждена');
+                notify('Авторизация HDRezka подтверждена.');
             });
-        });
-        add('hdrezka_auth_logout_action', 'button', 'Выйти из HDRezka', {}, function () {
+        }, 'Вход выполняется непосредственно в HDRezka. Данные сохраняются отдельно в этом расширении.');
+        add('hdrezka_auth_status_info', 'static', 'Данные авторизации сохраняются отдельно в расширении HDRezka.');
+        add('hdrezka_auth_logout_action', 'button', 'Выйти и очистить сессию', {}, function () {
             L.Storage.set('hdrezka_auth_cookie', '');
             L.Storage.set('hdrezka_auth_status', 'false');
             SESSION_COOKIE = '';
-            L.Noty.show('Сохранённая сессия HDRezka очищена');
+            notify('Сессия HDRezka очищена.');
         });
+        add('hdrezka_auth_proxy_title', 'title', 'Подключение');
+        add('hdrezka_auth_use_proxy', 'trigger', 'Использовать прокси для HDRezka', {default: false});
+        add('hdrezka_auth_custom_proxy', 'trigger', 'Использовать собственный прокси', {default: false});
+        add('hdrezka_auth_proxy_url', 'input', 'Адрес прокси', {placeholder: 'https://адрес-прокси/', default: ''}, null, 'Необязательно. Нужен, если прямое подключение к зеркалу не работает.');
+
+        AUTH_SETTINGS_REGISTERED = true;
+        return true;
+    }
+
+    function registerAuthSettingsWhenReady(attempt) {
+        if (registerAuthSettings()) return;
+        if (attempt < 20) setTimeout(function () {
+            registerAuthSettingsWhenReady(attempt + 1);
+        }, 250);
     }
 
     function init() {
         if (!L || !L.Listener || !L.Select || !L.Reguest) return;
-        registerAuthSettings();
+        registerAuthSettingsWhenReady(0);
+        if (L.Settings && L.Settings.listener && L.Settings.listener.follow) {
+            L.Settings.listener.follow('open', function () { registerAuthSettingsWhenReady(0); });
+        }
         L.Listener.follow('full', function (e) {
             if (e.type !== 'complite' || !e.data || !e.data.movie || !e.object || !e.object.activity) return;
             var container = e.object.activity.render().find('.full-start-new__buttons');
